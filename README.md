@@ -1,4 +1,4 @@
-# Career OS
+# ProPilot: Growth Dashboard
 
 A private, single-user "Personal Engineering Career OS" that turns your
 projects, skills, and experience into a connected evidence graph — see
