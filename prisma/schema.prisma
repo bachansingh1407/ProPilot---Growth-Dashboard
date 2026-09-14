@@ -1,0 +1,1047 @@
+// ============================================================================
+// Personal Engineering Career OS — Database Schema (Phase 1 draft)
+// PostgreSQL + Prisma
+// Single-user application: exactly one User row will ever exist, but the
+// User table still exists to anchor auth (NextAuth-style) and future-proof
+// nothing (no multi-tenant intent — see Section 4 of the spec).
+// ============================================================================
+
+generator client {
+  provider   = "prisma-client-js"
+  engineType = "client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ----------------------------------------------------------------------------
+// AUTH / IDENTITY
+// ----------------------------------------------------------------------------
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  passwordHash  String? // null if using an OAuth-only provider
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  sessions      Session[]
+  profile       Profile?
+
+  // Ownership — every domain entity below carries userId even though there is
+  // only one user, so authorization checks are uniform and the schema survives
+  // a future decision to self-host for more than one person.
+  experiences        Experience[]
+  skills             Skill[]
+  improvements       Improvement[]
+  projects           Project[]
+  achievements       Achievement[]
+  resumes            Resume[]
+  companies          Company[]
+  roles              Role[]
+  applications       Application[]
+  interviews         Interview[]
+  stories            Story[]
+  notes              TechnicalNote[]
+  careerGoals        CareerGoal[]
+  timelineItems      CareerTimelineItem[]
+  activities         Activity[]
+
+  @@map("users")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessionToken String   @unique
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model Profile {
+  id                    String   @id @default(cuid())
+  userId                String   @unique
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  fullName              String
+  headline              String? // e.g. "Senior Backend Engineer"
+  currentTitle          String?
+  yearsOfExperience     Float?
+  primaryFocus          String? // e.g. "Distributed Systems, Backend"
+  location              String?
+  remotePreference      RemotePreference?
+  targetRoles           String[] // simple string array; not a separate table, low cardinality
+  currentFocusStatement String?  @db.Text
+  bio                   String?  @db.Text
+  avatarUrl             String?
+  contactEmail          String?
+  githubUrl             String?
+  linkedinUrl           String?
+  websiteUrl            String?
+
+  isPortfolioPublished  Boolean  @default(false)
+  portfolioSlug         String?  @unique
+
+  updatedAt             DateTime @updatedAt
+
+  @@map("profiles")
+}
+
+enum RemotePreference {
+  REMOTE
+  HYBRID
+  ONSITE
+  FLEXIBLE
+}
+
+// ----------------------------------------------------------------------------
+// EXPERIENCE
+// ----------------------------------------------------------------------------
+
+model Experience {
+  id               String    @id @default(cuid())
+  userId           String
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  company          String
+  title            String
+  location         String?
+  employmentType   EmploymentType
+  startDate        DateTime
+  endDate          DateTime? // null = current
+  description      String?   @db.Text
+  responsibilities String[]
+  isPublic         Boolean   @default(false)
+
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  technologies     ExperienceTechnology[]
+  skills           SkillExperience[]
+  achievements     Achievement[]
+  projects         Project[]
+  resumeBullets    ResumeBullet[]
+  stories          Story[]
+  timelineItems    CareerTimelineItem[]
+
+  @@index([userId])
+  @@map("experiences")
+}
+
+enum EmploymentType {
+  FULL_TIME
+  PART_TIME
+  CONTRACT
+  FREELANCE
+  INTERNSHIP
+}
+
+model ExperienceTechnology {
+  id           String     @id @default(cuid())
+  experienceId String
+  experience   Experience @relation(fields: [experienceId], references: [id], onDelete: Cascade)
+  name         String
+
+  @@index([experienceId])
+  @@map("experience_technologies")
+}
+
+// ----------------------------------------------------------------------------
+// SKILLS + EVIDENCE (the core "evidence over claims" graph)
+// ----------------------------------------------------------------------------
+
+model Skill {
+  id                String       @id @default(cuid())
+  userId            String
+  user              User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name              String
+  category          String // e.g. "Backend", "Databases", "Cloud"
+  yearsOfExperience Float?
+  description       String?      @db.Text
+  notes             String?      @db.Text
+  // level/state is DERIVED, not stored as a magic score — see docs/evidence-model.md.
+  // manualLevelOverride allows the user to correct a computed state if needed.
+  manualLevelOverride SkillLevel?
+
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  evidence          SkillEvidence[]
+  projectLinks      ProjectSkill[]
+  experienceLinks   SkillExperience[]
+  achievementLinks  SkillAchievement[]
+  improvements      Improvement[]
+  interviewQuestions InterviewQuestionSkill[]
+  stories           StorySkill[]
+  resumeEvidence    ResumeEvidence[]
+  roleLinks         RoleSkill[]
+
+  @@unique([userId, name])
+  @@index([userId])
+  @@map("skills")
+}
+
+enum SkillLevel {
+  STRONG
+  DEVELOPING
+  WEAK
+  NEEDS_EVIDENCE
+  NOT_ENOUGH_DATA
+}
+
+// Generic polymorphic-ish evidence link — but modeled relationally (not JSON):
+// each evidence row points at exactly one concrete source table via nullable FKs
+// with a CHECK-style application constraint (enforced in the service layer)
+// that exactly one of these is non-null.
+model SkillEvidence {
+  id          String    @id @default(cuid())
+  skillId     String
+  skill       Skill     @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  projectId     String?
+  project       Project?      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  achievementId String?
+  achievement   Achievement?  @relation(fields: [achievementId], references: [id], onDelete: Cascade)
+  metricId      String?
+  metric        ProjectMetric? @relation(fields: [metricId], references: [id], onDelete: Cascade)
+  adrId         String?
+  adr           ADR?          @relation(fields: [adrId], references: [id], onDelete: Cascade)
+  noteId        String?
+  note          TechnicalNote? @relation(fields: [noteId], references: [id], onDelete: Cascade)
+
+  note_text     String?   @db.Text // free-text context on why this counts as evidence
+  createdAt     DateTime  @default(now())
+
+  @@index([skillId])
+  @@map("skill_evidence")
+}
+
+model SkillExperience {
+  skillId      String
+  skill        Skill      @relation(fields: [skillId], references: [id], onDelete: Cascade)
+  experienceId String
+  experience   Experience @relation(fields: [experienceId], references: [id], onDelete: Cascade)
+
+  @@id([skillId, experienceId])
+  @@map("skill_experiences")
+}
+
+model SkillAchievement {
+  skillId       String
+  skill         Skill       @relation(fields: [skillId], references: [id], onDelete: Cascade)
+  achievementId String
+  achievement   Achievement @relation(fields: [achievementId], references: [id], onDelete: Cascade)
+
+  @@id([skillId, achievementId])
+  @@map("skill_achievements")
+}
+
+// ----------------------------------------------------------------------------
+// IMPROVEMENT LOOP (replaces generic todos — Section 40)
+// ----------------------------------------------------------------------------
+
+model Improvement {
+  id            String            @id @default(cuid())
+  userId        String
+  user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  skillId       String?
+  skill         Skill?            @relation(fields: [skillId], references: [id], onDelete: SetNull)
+
+  weakness      String            @db.Text
+  evidenceGap   String?           @db.Text
+  strategy      String            @db.Text
+  status        ImprovementStatus @default(IDENTIFIED)
+  linkedProjectId String?
+  linkedProject Project?          @relation(fields: [linkedProjectId], references: [id], onDelete: SetNull)
+  reviewedAt    DateTime?
+  resultingEvidenceNote String?   @db.Text
+
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  @@index([userId])
+  @@map("improvements")
+}
+
+enum ImprovementStatus {
+  IDENTIFIED
+  IN_PROGRESS
+  EVIDENCE_ADDED
+  REVIEWED
+}
+
+// ----------------------------------------------------------------------------
+// PROJECTS (progressive disclosure entity — Section 15)
+// ----------------------------------------------------------------------------
+
+model Project {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  experienceId    String?
+  experience      Experience? @relation(fields: [experienceId], references: [id], onDelete: SetNull)
+
+  name            String
+  description     String?  @db.Text
+  githubUrl       String?
+  liveUrl         String?
+  isPublic        Boolean  @default(false)
+
+  problem         String?  @db.Text
+  requirements    String?  @db.Text
+  implementation  String?  @db.Text
+  documentation   String?  @db.Text // long-form Markdown
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  technologies    ProjectTechnology[]
+  links           ProjectLink[]
+  images          ProjectImage[]
+  skills          ProjectSkill[]
+  architecture    ProjectArchitecture[]
+  adrs            ADR[]
+  metrics         ProjectMetric[]
+  achievements    Achievement[]
+  interviewQuestions InterviewQuestionProject[]
+  stories         StoryProject[]
+  resumeEvidence  ResumeEvidence[]
+  skillEvidence   SkillEvidence[]
+  improvements    Improvement[]
+
+  @@index([userId])
+  @@map("projects")
+}
+
+model ProjectTechnology {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name      String
+
+  @@index([projectId])
+  @@map("project_technologies")
+}
+
+model ProjectSkill {
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  skillId   String
+  skill     Skill   @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, skillId])
+  @@map("project_skills")
+}
+
+model ProjectLink {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  label     String
+  url       String
+
+  @@index([projectId])
+  @@map("project_links")
+}
+
+model ProjectImage {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  url       String
+  caption   String?
+  sortOrder Int     @default(0)
+
+  @@index([projectId])
+  @@map("project_images")
+}
+
+// ----------------------------------------------------------------------------
+// ARCHITECTURE + ADRs (Sections 16–17)
+// ----------------------------------------------------------------------------
+
+model ProjectArchitecture {
+  id            String   @id @default(cuid())
+  projectId     String
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  title         String
+  category      ArchitectureCategory
+  description   String   @db.Text
+  tradeoffs     String?  @db.Text
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  diagrams      Diagram[]
+
+  @@index([projectId])
+  @@map("project_architectures")
+}
+
+enum ArchitectureCategory {
+  SYSTEM_DESIGN
+  DISTRIBUTED_SYSTEMS
+  DATABASE_DESIGN
+  EVENT_DRIVEN
+  CACHING
+  QUEUES
+  API_GATEWAY
+  MICROSERVICES
+  MONOLITH
+  CLOUD_ARCHITECTURE
+  OTHER
+}
+
+model Diagram {
+  id            String              @id @default(cuid())
+  architectureId String
+  architecture  ProjectArchitecture @relation(fields: [architectureId], references: [id], onDelete: Cascade)
+  title         String
+  mermaidSource String              @db.Text
+  createdAt     DateTime            @default(now())
+
+  @@index([architectureId])
+  @@map("diagrams")
+}
+
+model ADR {
+  id           String    @id @default(cuid())
+  projectId    String
+  project      Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  identifier   String // human-facing "ADR-001" etc, unique per project
+  title        String
+  status       ADRStatus @default(PROPOSED)
+  date         DateTime  @default(now())
+  context      String    @db.Text
+  problem      String    @db.Text
+  decision     String    @db.Text
+  alternatives String?   @db.Text
+  tradeoffs    String?   @db.Text
+  consequences String?   @db.Text
+  notes        String?   @db.Text
+
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  skillEvidence SkillEvidence[]
+
+  @@unique([projectId, identifier])
+  @@index([projectId])
+  @@map("adrs")
+}
+
+enum ADRStatus {
+  PROPOSED
+  ACCEPTED
+  REJECTED
+  DEPRECATED
+  SUPERSEDED
+}
+
+// ----------------------------------------------------------------------------
+// METRICS (Section 18)
+// ----------------------------------------------------------------------------
+
+model ProjectMetric {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  name      String // e.g. "P95 latency"
+  value     Float
+  unit      String // e.g. "ms", "%", "req/s"
+  date      DateTime @default(now())
+  source    String?  // e.g. "Datadog dashboard", "load test"
+  notes     String?  @db.Text
+
+  createdAt DateTime @default(now())
+
+  skillEvidence SkillEvidence[]
+
+  @@index([projectId])
+  @@index([date])
+  @@map("project_metrics")
+}
+
+// ----------------------------------------------------------------------------
+// ACHIEVEMENTS (Section 19)
+// ----------------------------------------------------------------------------
+
+model Achievement {
+  id                  String   @id @default(cuid())
+  userId              String
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  projectId           String?
+  project             Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  experienceId        String?
+  experience          Experience? @relation(fields: [experienceId], references: [id], onDelete: SetNull)
+
+  title               String
+  context             String   @db.Text
+  problem             String?  @db.Text
+  action              String   @db.Text
+  technicalComplexity String?  @db.Text
+  impact              String   @db.Text
+  date                DateTime?
+  isPublic            Boolean  @default(false)
+
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  technologies        String[]
+  skills              SkillAchievement[]
+  resumeBullets       ResumeBullet[]
+  stories             StoryAchievement[]
+  skillEvidence       SkillEvidence[]
+
+  @@index([userId])
+  @@map("achievements")
+}
+
+// ----------------------------------------------------------------------------
+// RESUME LAB (Sections 21–22)
+// ----------------------------------------------------------------------------
+
+model Resume {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name      String // e.g. "Backend-focused resume"
+  isDefault Boolean  @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  versions  ResumeVersion[]
+
+  @@index([userId])
+  @@map("resumes")
+}
+
+model ResumeVersion {
+  id           String   @id @default(cuid())
+  resumeId     String
+  resume       Resume   @relation(fields: [resumeId], references: [id], onDelete: Cascade)
+
+  label        String // e.g. "v3 — tailored for Stripe SRE"
+  targetRoleId String?
+  targetRole   Role?    @relation(fields: [targetRoleId], references: [id], onDelete: SetNull)
+  fileUrl      String? // exported PDF/DOCX, if generated
+
+  createdAt    DateTime @default(now())
+
+  bullets      ResumeBullet[]
+  analyses     ResumeAnalysis[]
+  applications Application[]
+
+  @@index([resumeId])
+  @@map("resume_versions")
+}
+
+model ResumeBullet {
+  id              String        @id @default(cuid())
+  resumeVersionId String
+  resumeVersion   ResumeVersion @relation(fields: [resumeVersionId], references: [id], onDelete: Cascade)
+  experienceId    String?
+  experience      Experience?   @relation(fields: [experienceId], references: [id], onDelete: SetNull)
+  achievementId   String?
+  achievement     Achievement?  @relation(fields: [achievementId], references: [id], onDelete: SetNull)
+
+  text            String        @db.Text
+  sortOrder       Int           @default(0)
+
+  evidence        ResumeEvidence[]
+
+  @@index([resumeVersionId])
+  @@map("resume_bullets")
+}
+
+model ResumeEvidence {
+  id             String       @id @default(cuid())
+  bulletId       String
+  bullet         ResumeBullet @relation(fields: [bulletId], references: [id], onDelete: Cascade)
+
+  projectId      String?
+  project        Project?     @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  skillId        String?
+  skill          Skill?       @relation(fields: [skillId], references: [id], onDelete: SetNull)
+
+  note           String?      @db.Text
+
+  @@index([bulletId])
+  @@map("resume_evidence")
+}
+
+model ResumeAnalysis {
+  id              String        @id @default(cuid())
+  resumeVersionId String
+  resumeVersion   ResumeVersion @relation(fields: [resumeVersionId], references: [id], onDelete: Cascade)
+  roleId          String?
+  role            Role?         @relation(fields: [roleId], references: [id], onDelete: SetNull)
+
+  jobDescriptionSnapshot String  @db.Text // stored verbatim at time of analysis
+  keywordAlignment       Json // structured: matched/missing keywords
+  skillsAlignment        Json
+  experienceAlignment    Json
+  evidenceGaps           Json
+  weakBullets            Json
+  source                 AnalysisSource @default(RULE_BASED)
+
+  createdAt       DateTime      @default(now())
+
+  @@index([resumeVersionId])
+  @@map("resume_analyses")
+}
+
+enum AnalysisSource {
+  RULE_BASED
+  AI_SUGGESTION
+}
+
+// ----------------------------------------------------------------------------
+// COMPANY / ROLE RESEARCH (Section 27)
+// ----------------------------------------------------------------------------
+
+model Company {
+  id                   String   @id @default(cuid())
+  userId               String
+  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name                 String
+  website              String?
+  engineeringBlogUrl   String?
+  githubUrl            String?
+  techStack            String[]
+  engineeringCulture   String?  @db.Text
+  interviewProcess     String?  @db.Text
+  knownInterviewTopics String[]
+  notes                String?  @db.Text
+  pros                 String?  @db.Text
+  concerns             String?  @db.Text
+  personalFit          String?  @db.Text
+  priority             CompanyPriority @default(MEDIUM)
+
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  roles                Role[]
+
+  @@index([userId])
+  @@map("companies")
+}
+
+enum CompanyPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+model Role {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyId       String
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  title           String
+  jobUrl          String?
+  jobDescription  String?  @db.Text
+  requirements    String[]
+  seniority       String?
+  location        String?
+  notes           String?  @db.Text
+  fit             String?  @db.Text
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  skills          RoleSkill[]
+  applications    Application[]
+  resumeVersions  ResumeVersion[]
+  resumeAnalyses  ResumeAnalysis[]
+
+  @@index([userId])
+  @@index([companyId])
+  @@map("roles")
+}
+
+model RoleSkill {
+  roleId  String
+  role    Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  skillId String
+  skill   Skill  @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, skillId])
+  @@map("role_skills")
+}
+
+// ----------------------------------------------------------------------------
+// APPLICATION TRACKING (Section 23)
+// ----------------------------------------------------------------------------
+
+model Application {
+  id              String            @id @default(cuid())
+  userId          String
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roleId          String
+  role            Role              @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  resumeVersionId String?
+  resumeVersion   ResumeVersion?    @relation(fields: [resumeVersionId], references: [id], onDelete: SetNull)
+
+  status          ApplicationStatus @default(RESEARCHING)
+  appliedAt       DateTime?
+  notes           String?           @db.Text
+
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  interviews      Interview[]
+
+  @@index([userId])
+  @@index([roleId])
+  @@map("applications")
+}
+
+enum ApplicationStatus {
+  RESEARCHING
+  APPLIED
+  PHONE_SCREEN
+  INTERVIEWING
+  OFFER
+  REJECTED
+  WITHDRAWN
+}
+
+// ----------------------------------------------------------------------------
+// INTERVIEW SYSTEM (Section 24)
+// ----------------------------------------------------------------------------
+
+model Interview {
+  id            String    @id @default(cuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  applicationId String?
+  application   Application? @relation(fields: [applicationId], references: [id], onDelete: SetNull)
+
+  round         String // e.g. "Onsite — System Design"
+  type          InterviewType
+  scheduledAt   DateTime?
+  durationMinutes Int?
+  notes         String?   @db.Text
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  answers       InterviewAnswer[]
+  feedback      InterviewFeedback[]
+
+  @@index([userId])
+  @@index([applicationId])
+  @@map("interviews")
+}
+
+enum InterviewType {
+  PHONE_SCREEN
+  TECHNICAL
+  SYSTEM_DESIGN
+  BEHAVIORAL
+  ONSITE_LOOP
+  TAKE_HOME
+  OTHER
+}
+
+model InterviewQuestion {
+  id         String   @id @default(cuid())
+  text       String   @db.Text
+  category   String? // e.g. "System Design", "Behavioral", "Distributed Systems"
+  difficulty Difficulty?
+  source     String? // e.g. "Glassdoor", "self-authored", "past interview"
+
+  createdAt  DateTime @default(now())
+
+  answers    InterviewAnswer[]
+  skills     InterviewQuestionSkill[]
+  projects   InterviewQuestionProject[]
+  stories    StoryQuestion[]
+
+  @@map("interview_questions")
+}
+
+enum Difficulty {
+  EASY
+  MEDIUM
+  HARD
+}
+
+model InterviewQuestionSkill {
+  questionId String
+  question   InterviewQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  skillId    String
+  skill      Skill             @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@id([questionId, skillId])
+  @@map("interview_question_skills")
+}
+
+model InterviewQuestionProject {
+  questionId String
+  question   InterviewQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  projectId  String
+  project    Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@id([questionId, projectId])
+  @@map("interview_question_projects")
+}
+
+model InterviewAnswer {
+  id          String            @id @default(cuid())
+  interviewId String
+  interview   Interview         @relation(fields: [interviewId], references: [id], onDelete: Cascade)
+  questionId  String
+  question    InterviewQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  myAnswer    String            @db.Text
+  selfRating  Difficulty? // reused enum informally, or replace with its own rating enum
+  wentWell    String?           @db.Text
+  wentPoorly  String?           @db.Text
+
+  createdAt   DateTime          @default(now())
+
+  @@index([interviewId])
+  @@index([questionId])
+  @@map("interview_answers")
+}
+
+model InterviewFeedback {
+  id          String    @id @default(cuid())
+  interviewId String
+  interview   Interview @relation(fields: [interviewId], references: [id], onDelete: Cascade)
+
+  strengths   String?   @db.Text
+  weaknesses  String?   @db.Text
+  outcome     String? // e.g. "Passed", "Did not pass", "Pending"
+  notes       String?   @db.Text
+
+  createdAt   DateTime  @default(now())
+
+  @@index([interviewId])
+  @@map("interview_feedback")
+}
+
+// ----------------------------------------------------------------------------
+// STAR STORY BANK (Section 25)
+// ----------------------------------------------------------------------------
+
+model Story {
+  id           String        @id @default(cuid())
+  userId       String
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  experienceId String?
+  experience   Experience?   @relation(fields: [experienceId], references: [id], onDelete: SetNull)
+
+  title        String
+  situation    String        @db.Text
+  task         String        @db.Text
+  action       String        @db.Text
+  result       String        @db.Text
+  category     StoryCategory
+  company      String?
+  notes        String?       @db.Text
+
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  projects     StoryProject[]
+  skills       StorySkill[]
+  achievements StoryAchievement[]
+  questions    StoryQuestion[]
+
+  @@index([userId])
+  @@map("stories")
+}
+
+enum StoryCategory {
+  LEADERSHIP
+  CONFLICT
+  FAILURE
+  ARCHITECTURE
+  PERFORMANCE
+  INCIDENT
+  MENTORING
+  OWNERSHIP
+  AMBIGUITY
+  TECHNICAL_DECISION
+  MIGRATION
+  PRODUCTION_OUTAGE
+}
+
+model StoryProject {
+  storyId   String
+  story     Story   @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@id([storyId, projectId])
+  @@map("story_projects")
+}
+
+model StorySkill {
+  storyId String
+  story   Story  @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  skillId String
+  skill   Skill  @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@id([storyId, skillId])
+  @@map("story_skills")
+}
+
+model StoryAchievement {
+  storyId       String
+  story         Story       @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  achievementId String
+  achievement   Achievement @relation(fields: [achievementId], references: [id], onDelete: Cascade)
+
+  @@id([storyId, achievementId])
+  @@map("story_achievements")
+}
+
+model StoryQuestion {
+  storyId    String
+  story      Story             @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  questionId String
+  question   InterviewQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@id([storyId, questionId])
+  @@map("story_questions")
+}
+
+// ----------------------------------------------------------------------------
+// ENGINEERING NOTES (Section 26)
+// ----------------------------------------------------------------------------
+
+model TechnicalNote {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  title     String
+  category  NoteCategory
+  content   String   @db.Text // Markdown
+  tags      String[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  skillEvidence SkillEvidence[]
+
+  @@index([userId])
+  @@index([category])
+  @@map("technical_notes")
+}
+
+enum NoteCategory {
+  SYSTEM_DESIGN
+  DATABASES
+  BACKEND
+  FRONTEND
+  CLOUD
+  DEVOPS
+  DISTRIBUTED_SYSTEMS
+  SECURITY
+  AI
+  ARCHITECTURE
+  PROGRAMMING_LANGUAGES
+  INTERVIEW_NOTES
+}
+
+// ----------------------------------------------------------------------------
+// CAREER GOALS + TIMELINE
+// ----------------------------------------------------------------------------
+
+model CareerGoal {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  title       String
+  description String?  @db.Text
+  targetDate  DateTime?
+  status      GoalStatus @default(ACTIVE)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId])
+  @@map("career_goals")
+}
+
+enum GoalStatus {
+  ACTIVE
+  ACHIEVED
+  ABANDONED
+}
+
+model CareerTimelineItem {
+  id           String    @id @default(cuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  experienceId String?
+  experience   Experience? @relation(fields: [experienceId], references: [id], onDelete: SetNull)
+
+  date         DateTime
+  title        String
+  description  String?   @db.Text
+  type         TimelineItemType
+
+  createdAt    DateTime  @default(now())
+
+  @@index([userId])
+  @@index([date])
+  @@map("career_timeline_items")
+}
+
+enum TimelineItemType {
+  ROLE_CHANGE
+  PROMOTION
+  PROJECT_MILESTONE
+  ACHIEVEMENT
+  EDUCATION
+  CERTIFICATION
+  OTHER
+}
+
+// ----------------------------------------------------------------------------
+// ACTIVITY LOG (drives dashboard "Recent Activity" — Section 31)
+// ----------------------------------------------------------------------------
+
+model Activity {
+  id         String       @id @default(cuid())
+  userId     String
+  user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type       ActivityType
+  entityType String // e.g. "Project", "Skill", "ADR"
+  entityId   String
+  summary    String // e.g. "Added project \"Realtime Order Router\""
+
+  createdAt  DateTime     @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
+  @@map("activities")
+}
+
+enum ActivityType {
+  CREATED
+  UPDATED
+  DELETED
+}
